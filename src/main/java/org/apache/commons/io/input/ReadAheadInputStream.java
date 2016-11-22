@@ -3,8 +3,13 @@ package org.apache.commons.io.input;
 import static java.lang.System.arraycopy;
 import static org.apache.commons.io.IOUtils.EOF;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * InputStream proxy with a buffer that uses a thread to read
@@ -17,37 +22,51 @@ import java.io.InputStream;
  * @version $Id$
  * @see java.io.BufferedInputStream
  */
-public class ReadAheadInputStream extends InputStream {
+public class ReadAheadInputStream extends FilterInputStream {
 
     public static final int DEFAULT_BUFFER_SIZE = 8192;
 
-    private final InputStream innerStream;
     private final byte[] buffer;
-    private final Thread fillingThread;
     private final int size;
     private final boolean closeInternal;
+    private final ExecutorService executorService;
     private int bytesReadFromInnerStream;
     private int numberOfBytesToReadFromInnerStream;
     private boolean threadIsAlive;
+    private Future<?> future;
 
 
     public ReadAheadInputStream(InputStream in) {
         this(in, true);
     }
 
+    public ReadAheadInputStream(InputStream in, ExecutorService executorService) {
+        this(in, true, executorService);
+    }
+
     public ReadAheadInputStream(InputStream in, boolean closeInternal) {
         this(in, DEFAULT_BUFFER_SIZE, closeInternal);
+    }
+
+    public ReadAheadInputStream(InputStream in, boolean closeInternal, ExecutorService executorService) {
+        this(in, DEFAULT_BUFFER_SIZE, closeInternal, executorService);
     }
 
     public ReadAheadInputStream(final InputStream in, int size) {
         this(in, size, true);
     }
 
+    public ReadAheadInputStream(final InputStream in, int size, ExecutorService executorService) {
+        this(in, size, true, executorService);
+    }
+
     public ReadAheadInputStream(final InputStream in, int size, boolean closeInternal) {
-        this.innerStream = in;
-        if (in == null) {
-            throw new IllegalArgumentException("inner stream argument cannot be null");
-        }
+        this(in, size, closeInternal, Executors.newSingleThreadExecutor());
+    }
+
+    public ReadAheadInputStream(final InputStream in, int size, boolean closeInternal, ExecutorService executorService) {
+        super(in);
+        this.executorService = executorService;
         this.size = size;
         if (size <= 0) {
             throw new IllegalArgumentException("size argument must be positive ");
@@ -58,14 +77,13 @@ public class ReadAheadInputStream extends InputStream {
         this.bytesReadFromInnerStream = 0;
 
         readFromInnerStream();
-        this.fillingThread = createFillingThread();
-        this.fillingThread.start();
+        createFillingThread();
 
     }
 
-    private Thread createFillingThread() {
+    private void createFillingThread() {
         threadIsAlive = true;
-        return new Thread(new Runnable() {
+        future = executorService.submit(new Runnable() {
             @Override
             public void run() {
                 while (threadIsAlive) {
@@ -78,7 +96,7 @@ public class ReadAheadInputStream extends InputStream {
     private synchronized void readFromInnerStream() {
         try {
             waitIfCantReadMoreData();
-            int numRead = innerStream.read(buffer, 0 ,numberOfBytesToReadFromInnerStream);
+            int numRead = in.read(buffer, 0 ,numberOfBytesToReadFromInnerStream);
             if (numRead >= 0) {
                 bytesReadFromInnerStream += numRead;
                 numberOfBytesToReadFromInnerStream = size - bytesReadFromInnerStream;
@@ -126,13 +144,15 @@ public class ReadAheadInputStream extends InputStream {
     public void close() {
         threadIsAlive = false;
         try {
-            fillingThread.wait();
+            future.get();
             if (closeInternal) {
-                innerStream.close();
+                in.close();
             }
         } catch (InterruptedException  e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
+            throw new RuntimeException(e);
+        } catch (ExecutionException e) {
             throw new RuntimeException(e);
         }
 
